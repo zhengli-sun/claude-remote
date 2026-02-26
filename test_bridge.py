@@ -517,5 +517,31 @@ class TestDailyDigest:
         with mock.patch("subprocess.run", return_value=mock_result):
             result = bridge.get_pending_reviews()
         assert result == []
+
+
+# ---------------------------------------------------------------------------
+# generate_subject
+# ---------------------------------------------------------------------------
+
+
+class TestGenerateSubject:
+    def test_short_message(self):
+        result = bridge.generate_subject("How do I fix the login bug?")
+        assert result == "[claude] How do I fix the login bug?"
+
+    def test_long_message_truncated(self):
+        long_msg = "Please refactor the authentication module to use OAuth2 instead of the legacy token system"
+        result = bridge.generate_subject(long_msg)
+        assert result.endswith("...")
+        assert len(result) <= 60  # [claude] prefix + 50 + ...
+
+    def test_claude_prefix_stripped(self):
+        result = bridge.generate_subject("[claude] deploy the new service")
+        assert result == "[claude] deploy the new service"
+        assert "[claude] [claude]" not in result
+
+    def test_empty_message_fallback(self):
+        assert bridge.generate_subject("") == "[claude] conversation"
+        assert bridge.generate_subject("   ") == "[claude] conversation"
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

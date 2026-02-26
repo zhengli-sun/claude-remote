@@ -228,6 +228,15 @@ def strip_claude_prefix(text: str) -> str:
     return re.sub(r"^\[claude\]\s*", "", text, flags=re.IGNORECASE)
 
 
+def generate_subject(body: str, max_len: int = 50) -> str:
+    """Generate a short subject line from the user's message."""
+    first_line = body.split("\n")[0].strip()
+    first_line = re.sub(r'^\[claude\]\s*', '', first_line, flags=re.IGNORECASE)
+    if len(first_line) > max_len:
+        first_line = first_line[:max_len].rsplit(" ", 1)[0] + "..."
+    return f"[claude] {first_line}" if first_line else "[claude] conversation"
+
+
 def _extract_attachments(payload: dict) -> list[dict]:
     """Extract attachment metadata (filename, size, id) from a MIME payload."""
     attachments = []
@@ -328,11 +337,14 @@ def build_thread_context(thread_messages: list[dict]) -> str:
     return "\n\n---\n\n".join(parts)
 
 
-def send_reply(service, original_msg: dict, body_text: str, my_email: str):
+def send_reply(service, original_msg: dict, body_text: str, my_email: str, override_subject: str = None):
     """Reply to a message in the same thread with a distinct sender name."""
-    subject = original_msg["subject"]
-    if not subject.lower().startswith("re:"):
-        subject = f"Re: {subject}"
+    if override_subject:
+        subject = override_subject
+    else:
+        subject = original_msg["subject"]
+        if not subject.lower().startswith("re:"):
+            subject = f"Re: {subject}"
 
     # Build references chain for proper threading
     references = original_msg.get("references", "")
@@ -811,9 +823,13 @@ def _poll_cycle(
                 prompt = att_preamble + body
             response = invoke_claude(prompt, session_id, resume=False, on_progress=on_progress)
 
-        # Reply in thread
+        # Reply in thread -- override subject on first reply in new thread
         try:
-            send_reply(service, msg, response, my_email)
+            if not resume:
+                new_subject = generate_subject(body)
+                send_reply(service, msg, response, my_email, override_subject=f"Re: {new_subject}")
+            else:
+                send_reply(service, msg, response, my_email)
             log.info("Replied to message %s (session=%s)", msg_id, session_id[:8])
         except Exception:
             log.exception("Failed to send reply for message %s", msg_id)
