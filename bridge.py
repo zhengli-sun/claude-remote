@@ -419,7 +419,13 @@ def invoke_claude(
             if elapsed >= CLAUDE_TIMEOUT:
                 proc.kill()
                 proc.wait()
-                output = f"[Claude timed out after {CLAUDE_TIMEOUT}s]"
+                output = (
+                    f"[Timed out after {CLAUDE_TIMEOUT // 60} minutes]\n\n"
+                    "The task was too long for a single request. You can:\n"
+                    "- Reply in this thread to continue where it left off\n"
+                    "- Break the task into smaller steps\n"
+                    "- Reply /resume to pick up the session"
+                )
                 log.warning("Claude timed out for session %s", session_id[:8])
                 break
             if on_progress and elapsed >= next_progress:
@@ -428,11 +434,23 @@ def invoke_claude(
         else:
             output = proc.stdout.read().strip()
             if proc.returncode != 0 and not output:
-                output = f"[Claude exited with code {proc.returncode}]\n{proc.stderr.read().strip()}"
+                stderr_text = proc.stderr.read().strip()
+                output = (
+                    f"[Claude exited with code {proc.returncode}]\n\n"
+                    + (f"Error: {stderr_text}\n\n" if stderr_text else "")
+                    + "Reply in this thread to retry, or start a new thread with [claude] prefix."
+                )
             if not output:
-                output = "[Claude returned empty output]"
+                output = (
+                    "[Claude returned empty output]\n\n"
+                    "This sometimes happens with very short tasks. Try rephrasing your request."
+                )
     except FileNotFoundError:
-        output = "[Error: 'claude' command not found. Is Claude Code installed?]"
+        output = (
+            "[Error: 'claude' command not found]\n\n"
+            "Claude Code doesn't appear to be installed or is not in PATH.\n"
+            "Install it: npm install -g @anthropic-ai/claude-code"
+        )
         log.error("claude command not found")
 
     # Truncate if too large

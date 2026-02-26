@@ -543,5 +543,59 @@ class TestGenerateSubject:
     def test_empty_message_fallback(self):
         assert bridge.generate_subject("") == "[claude] conversation"
         assert bridge.generate_subject("   ") == "[claude] conversation"
+
+# ---------------------------------------------------------------------------
+# invoke_claude error messages
+# ---------------------------------------------------------------------------
+
+
+class TestInvokeClaudeErrors:
+    """Error messages from invoke_claude must contain actionable guidance."""
+
+    def test_timeout_message_has_recovery_steps(self):
+        with mock.patch("subprocess.Popen") as mock_popen:
+            proc = mock.MagicMock()
+            proc.poll.return_value = None  # never finishes
+            mock_popen.return_value = proc
+            with mock.patch.object(bridge, "CLAUDE_TIMEOUT", 2):
+                with mock.patch("time.sleep"):
+                    result = bridge.invoke_claude("hi", "sess-1")
+        assert "Timed out" in result
+        assert "/resume" in result
+        assert "smaller steps" in result
+
+    def test_nonzero_exit_message_has_retry_hint(self):
+        with mock.patch("subprocess.Popen") as mock_popen:
+            proc = mock.MagicMock()
+            proc.poll.side_effect = [None, 0]  # finishes on second poll
+            proc.stdout.read.return_value = ""
+            proc.stderr.read.return_value = "some error"
+            proc.returncode = 1
+            mock_popen.return_value = proc
+            with mock.patch("time.sleep"):
+                result = bridge.invoke_claude("hi", "sess-2")
+        assert "exited with code 1" in result
+        assert "Error: some error" in result
+        assert "retry" in result.lower()
+
+    def test_command_not_found_message_has_install_instructions(self):
+        with mock.patch("subprocess.Popen", side_effect=FileNotFoundError):
+            result = bridge.invoke_claude("hi", "sess-3")
+        assert "not found" in result
+        assert "npm install" in result
+
+    def test_empty_output_message_has_suggestion(self):
+        with mock.patch("subprocess.Popen") as mock_popen:
+            proc = mock.MagicMock()
+            proc.poll.side_effect = [None, 0]
+            proc.stdout.read.return_value = ""
+            proc.stderr.read.return_value = ""
+            proc.returncode = 0
+            mock_popen.return_value = proc
+            with mock.patch("time.sleep"):
+                result = bridge.invoke_claude("hi", "sess-4")
+        assert "empty output" in result.lower()
+        assert "rephrasing" in result.lower()
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
