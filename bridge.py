@@ -719,6 +719,14 @@ def _record_invocation():
 # ---------------------------------------------------------------------------
 
 
+CLAUDE_SKILLS_DIR = Path.home() / ".claude" / "skills"
+
+
+def _skill_exists(skill_name: str) -> bool:
+    """Check if a Claude Code skill is installed."""
+    return (CLAUDE_SKILLS_DIR / skill_name).is_dir()
+
+
 def _invoke_skill(skill_name: str) -> str:
     """Invoke a Claude Code skill (e.g. /brief, /summary) via claude -p."""
     return invoke_claude(f"/{skill_name}", str(uuid.uuid4()), resume=False)
@@ -745,6 +753,10 @@ def send_daily_digest(service, my_email: str, thread_sessions: dict, processed_c
         last_sent = DIGEST_LAST_SENT_FILE.read_text().strip()
         if last_sent == now.strftime("%Y-%m-%d"):
             return
+
+    if not _skill_exists("brief"):
+        log.debug("Skipping morning briefing: /brief skill not installed")
+        return
 
     log.info("Generating morning briefing via /brief skill")
     body = _invoke_skill("brief")
@@ -784,6 +796,10 @@ def send_work_summary(service, my_email: str):
         last_sent = SUMMARY_LAST_SENT_FILE.read_text().strip()
         if last_sent == now.strftime("%Y-%m-%d"):
             return
+
+    if not _skill_exists("summary"):
+        log.debug("Skipping work summary: /summary skill not installed")
+        return
 
     log.info("Generating work summary via /summary skill")
     body = _invoke_skill("summary")
@@ -920,6 +936,13 @@ def gmail_poll_cycle(
             save_processed_id(msg_id)
             continue
         if body.lower() == "/summary":
+            if not _skill_exists("summary"):
+                response = "The /summary skill is not installed. Create it at ~/.claude/skills/summary/"
+                send_reply(service, msg, response, my_email)
+                mark_as_read(service, msg_id)
+                processed_ids.add(msg_id)
+                save_processed_id(msg_id)
+                continue
             log.info("Manual work summary requested via /summary skill")
             response = _invoke_skill("summary")
             summary_sent = send_reply(service, msg, response, my_email)
@@ -932,6 +955,13 @@ def gmail_poll_cycle(
             save_processed_id(msg_id)
             continue
         if body.lower() == "/brief":
+            if not _skill_exists("brief"):
+                response = "The /brief skill is not installed. Create it at ~/.claude/skills/brief/"
+                send_reply(service, msg, response, my_email)
+                mark_as_read(service, msg_id)
+                processed_ids.add(msg_id)
+                save_processed_id(msg_id)
+                continue
             log.info("Manual morning brief requested via /brief skill")
             response = _invoke_skill("brief")
             brief_sent = send_reply(service, msg, response, my_email)

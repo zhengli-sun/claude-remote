@@ -136,8 +136,8 @@ Gmail-only commands:
 |---------|-------------|
 | `/sessions` | List your 10 most recent Claude Code sessions |
 | `/resume <id>` | Resume any session by ID |
-| `/summary` | Generate an end-of-day work summary |
-| `/brief` | Generate a morning briefing |
+| `/summary` | Generate an end-of-day work summary (requires `/summary` skill) |
+| `/brief` | Generate a morning briefing (requires `/brief` skill) |
 
 ## Features
 
@@ -153,7 +153,7 @@ Gmail-only commands:
 - **File attachments** - send images, PDFs, or code files and Claude will analyze them
 - **Progress emails** - sends "still working..." replies every 2 minutes for long tasks
 - **Smart thread naming** - first reply uses a descriptive subject line
-- **Scheduled emails** - daily digest (5am GMT) and work summary (10pm local)
+- **Scheduled emails** - daily digest (5am GMT) and work summary (10pm local), only if the `/brief` and `/summary` skills are installed in `~/.claude/skills/`
 
 ### Slack-specific
 - **$0 polling** - reads Slack via direct MCP HTTP calls (no LLM involved in polling)
