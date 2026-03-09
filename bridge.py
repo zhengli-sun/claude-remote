@@ -957,6 +957,7 @@ def gmail_poll_cycle(
             session_id = thread_sessions[thread_id]
         else:
             session_id = str(uuid.uuid4())
+        log.info("Session for thread %s: session=%s, resume=%s", thread_id, session_id[:8], resume)
 
         # Build attachment preamble
         att_preamble = ""
@@ -1471,8 +1472,6 @@ def slack_poll_cycle(token: str, state: dict):
         # Acknowledge receipt with eyes emoji
         mcp_add_reaction(token, channel_id, msg["ts"], "eyes")
 
-        log.info("Processing: %.80s", text)
-
         # Determine session: resume existing or start new
         thread_sessions = state.get("thread_sessions", {})
         resume = thread_ts in thread_sessions
@@ -1480,6 +1479,7 @@ def slack_poll_cycle(token: str, state: dict):
             session_id = thread_sessions[thread_ts]
         else:
             session_id = str(uuid.uuid4())
+        log.info("Processing (session=%s, resume=%s): %.80s", session_id[:8], resume, text)
 
         # Build prompt for Claude
         if resume:
