@@ -1441,8 +1441,19 @@ def slack_poll_cycle(token: str, state: dict):
 
         log.info("Processing: %.80s", text)
 
+        # Determine session: resume existing or start new
+        thread_sessions = state.get("thread_sessions", {})
+        resume = thread_ts in thread_sessions
+        if resume:
+            session_id = thread_sessions[thread_ts]
+        else:
+            session_id = str(uuid.uuid4())
+
         # Build prompt for Claude
-        if msg["is_thread_reply"]:
+        if resume:
+            # Resumed session already has context; just send the new message
+            prompt = text
+        elif msg["is_thread_reply"]:
             thread_context = msg.get("thread_context", "")
             prompt = (
                 f"You are an AI assistant replying in a Slack thread. "
@@ -1464,7 +1475,32 @@ def slack_poll_cycle(token: str, state: dict):
 
         _record_invocation()
         start_time = time.time()
-        response = invoke_claude(prompt, thread_id=thread_ts)
+        response = invoke_claude(prompt, session_id, resume=resume, thread_id=thread_ts)
+
+        # If resume failed, retry fresh with full thread context
+        if resume and "[Claude exited with code" in response:
+            log.warning("Resume failed for Slack session %s, retrying fresh", session_id[:8])
+            session_id = str(uuid.uuid4())
+            thread_context = msg.get("thread_context", "")
+            if thread_context:
+                prompt = (
+                    f"You are an AI assistant replying in a Slack thread. "
+                    f"Here is the full thread context:\n\n{thread_context}\n\n"
+                    f"The latest message is: {text}\n\n"
+                    f"Respond to this latest message. Use Slack mrkdwn formatting "
+                    f"(*bold*, _italic_, `code`). Be concise and helpful. "
+                    f"Use all available MCP tools if needed."
+                )
+            else:
+                prompt = (
+                    f"You are an AI assistant responding to a Slack message. "
+                    f"The message is: {text}\n\n"
+                    f"Process this as a task. Use all available MCP tools "
+                    f"(Slack, Google Workspace, Glean, etc.) as needed. "
+                    f"Use Slack mrkdwn formatting (*bold*, _italic_, `code`). "
+                    f"Be concise and helpful."
+                )
+            response = invoke_claude(prompt, session_id, resume=False, thread_id=thread_ts)
         elapsed = time.time() - start_time
 
         # Post reply - @mention user if task took longer than threshold
@@ -1476,11 +1512,13 @@ def slack_poll_cycle(token: str, state: dict):
 
         if success:
             replied += 1
-            log.info("Replied to message %s", msg["ts"])
+            log.info("Replied to message %s (session=%s)", msg["ts"], session_id[:8])
             # Mark done with checkmark
             mcp_add_reaction(token, channel_id, msg["ts"], "white_check_mark")
-            # Track thread
+            # Track thread and session
             active_threads[thread_ts] = msg["ts"]
+            thread_sessions[thread_ts] = session_id
+            state["thread_sessions"] = thread_sessions
         else:
             log.error("Failed to reply to message %s", msg["ts"])
 
@@ -1508,8 +1546,14 @@ def slack_poll_cycle(token: str, state: dict):
         k: v for k, v in active_threads.items()
         if float(v) > cutoff
     }
+    thread_sessions = state.get("thread_sessions", {})
+    thread_sessions = {
+        k: v for k, v in thread_sessions.items()
+        if k in active_threads
+    }
 
     state["active_threads"] = active_threads
+    state["thread_sessions"] = thread_sessions
     save_slack_state(state)
 
     log.info("Processed %d, replied to %d", len(to_process), replied)
