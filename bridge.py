@@ -33,6 +33,7 @@ from email.mime.text import MIMEText
 from pathlib import Path
 from typing import Optional
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
 from urllib.request import Request as URLRequest
 from urllib.request import urlopen
 
@@ -1098,6 +1099,84 @@ def _find_slack_token_entry(creds: dict) -> Optional[dict]:
 
 
 SLACK_TOKEN_FILE = CONFIG_DIR / "slack_mcp_token.json"
+SLACK_MCP_CLIENT_ID = "1601185624273.8899143856786"
+# Refresh token when it has less than this many hours left (0 = disabled)
+SLACK_TOKEN_REFRESH_HOURS = int(os.environ.get("CLAUDE_REMOTE_SLACK_REFRESH_HOURS", "2"))
+
+
+def _notify_refresh_failure(entry: dict, error_msg: str):
+    """Send a Slack notification when token refresh fails."""
+    token = entry.get("accessToken")
+    if not token:
+        return
+    try:
+        state = load_slack_state()
+        channel_id = state.get("channel_id")
+        if channel_id:
+            msg = (
+                f"{AGENT_PREFIX} :warning: {error_msg}\n"
+                f"Run `cd ~/Projects/claude-remote && .venv/bin/python slack_oauth.py` to re-authenticate."
+            )
+            _mcp_call("slack_send_message", {
+                "channel_id": channel_id,
+                "message": msg,
+            }, token)
+            log.info("Sent token refresh failure notification to Slack")
+    except Exception as e:
+        log.warning("Failed to send refresh failure notification: %s", e)
+
+
+def _refresh_slack_token(entry: dict) -> Optional[dict]:
+    """Refresh the Slack OAuth token using the refresh token.
+
+    Returns updated entry on success, None on failure.
+    """
+    refresh_token = entry.get("refreshToken")
+    if not refresh_token:
+        log.warning("No refresh token available for Slack token refresh")
+        return None
+
+    log.info("Refreshing Slack OAuth token...")
+    try:
+        data = urlencode({
+            "client_id": SLACK_MCP_CLIENT_ID,
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+        }).encode()
+
+        req = URLRequest(
+            "https://slack.com/api/oauth.v2.user.access",
+            data=data,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            method="POST",
+        )
+
+        with urlopen(req, timeout=30) as resp:
+            result = json.loads(resp.read())
+
+        if not result.get("ok"):
+            log.error("Slack token refresh failed: %s", result.get("error", result))
+            _notify_refresh_failure(entry, f"Slack token refresh failed: {result.get('error', 'unknown')}")
+            return None
+
+        new_entry = {
+            "serverUrl": entry.get("serverUrl", MCP_URL),
+            "accessToken": result["access_token"],
+            "refreshToken": result.get("refresh_token", refresh_token),
+            "expiresAt": int((time.time() + result.get("expires_in", 43200)) * 1000),
+        }
+
+        SLACK_TOKEN_FILE.write_text(json.dumps(new_entry, indent=2))
+        SLACK_TOKEN_FILE.chmod(0o600)
+
+        expires_str = datetime.fromtimestamp(new_entry["expiresAt"] / 1000).isoformat()
+        log.info("Slack token refreshed successfully, expires at %s", expires_str)
+        return new_entry
+
+    except Exception as e:
+        log.error("Slack token refresh error: %s", e)
+        _notify_refresh_failure(entry, f"Slack token refresh error: {e}")
+        return None
 
 
 def get_slack_token() -> Optional[str]:
@@ -1106,6 +1185,8 @@ def get_slack_token() -> Optional[str]:
     Checks in order:
     1. Bridge's own token file (~/.claude-remote/slack_mcp_token.json)
     2. Claude Code credentials file (~/.claude/.credentials.json)
+
+    Auto-refreshes if SLACK_TOKEN_REFRESH_HOURS > 0 and token is near expiry.
     """
     # Try bridge's own persistent token first
     entry = None
@@ -1123,15 +1204,31 @@ def get_slack_token() -> Optional[str]:
         log.error("No active Slack MCP token found in credentials")
         return None
 
-    # Check expiry
+    # Check expiry and auto-refresh
     expires_at = entry.get("expiresAt", 0)
     now_ms = int(time.time() * 1000)
-    if expires_at and now_ms > expires_at:
-        log.warning(
-            "Slack token expired at %s. Run: .venv/bin/python slack_oauth.py",
-            datetime.fromtimestamp(expires_at / 1000).isoformat(),
-        )
-        return None
+
+    if expires_at:
+        remaining_hours = (expires_at - now_ms) / (1000 * 3600)
+
+        if now_ms > expires_at:
+            # Token expired — try refresh before giving up
+            if SLACK_TOKEN_REFRESH_HOURS > 0:
+                refreshed = _refresh_slack_token(entry)
+                if refreshed:
+                    return refreshed["accessToken"]
+            log.warning(
+                "Slack token expired at %s. Run: .venv/bin/python slack_oauth.py",
+                datetime.fromtimestamp(expires_at / 1000).isoformat(),
+            )
+            return None
+
+        if SLACK_TOKEN_REFRESH_HOURS > 0 and remaining_hours < SLACK_TOKEN_REFRESH_HOURS:
+            log.info("Slack token expires in %.1f hours, refreshing proactively", remaining_hours)
+            refreshed = _refresh_slack_token(entry)
+            if refreshed:
+                return refreshed["accessToken"]
+            # If refresh fails, continue with current token
 
     return entry["accessToken"]
 
@@ -1511,33 +1608,25 @@ def slack_poll_cycle(token: str, state: dict):
         log.info("Processing (session=%s, resume=%s): %.80s", session_id[:8], resume, text)
 
         # Build prompt for Claude
-        no_post_rule = (
-            "SLACK POSTING RULE: You may ONLY post to the current thread "
-            f"(channel {channel_id}, thread_ts {thread_ts}). "
-            "Do NOT post to any other channel, thread, or DM unless the user "
-            "explicitly asks you to. Do NOT start new threads or send DMs. "
-        )
         if resume:
             # Resumed session already has context; just send the new message
-            prompt = f"{no_post_rule}{text}"
+            prompt = text
         elif msg["is_thread_reply"]:
             thread_context = msg.get("thread_context", "")
             prompt = (
-                f"{no_post_rule}"
                 f"You are an AI assistant replying in a Slack thread. "
                 f"Here is the full thread context:\n\n{thread_context}\n\n"
                 f"The latest message is: {text}\n\n"
                 f"Respond to this latest message. Use Slack mrkdwn formatting "
                 f"(*bold*, _italic_, `code`). Be concise and helpful. "
-                f"Use all available MCP tools for research if needed."
+                f"Use all available MCP tools if needed."
             )
         else:
             prompt = (
-                f"{no_post_rule}"
                 f"You are an AI assistant responding to a Slack message. "
                 f"The message is: {text}\n\n"
                 f"Process this as a task. Use all available MCP tools "
-                f"(Slack search, Google Workspace, Glean, etc.) for research. "
+                f"(Slack, Google Workspace, Glean, etc.) as needed. "
                 f"Use Slack mrkdwn formatting (*bold*, _italic_, `code`). "
                 f"Be concise and helpful."
             )
@@ -1553,17 +1642,15 @@ def slack_poll_cycle(token: str, state: dict):
             thread_context = msg.get("thread_context", "")
             if thread_context:
                 prompt = (
-                    f"{no_post_rule}"
                     f"You are an AI assistant replying in a Slack thread. "
                     f"Here is the full thread context:\n\n{thread_context}\n\n"
                     f"The latest message is: {text}\n\n"
                     f"Respond to this latest message. Use Slack mrkdwn formatting "
                     f"(*bold*, _italic_, `code`). Be concise and helpful. "
-                    f"Use all available MCP tools for research if needed."
+                    f"Use all available MCP tools if needed."
                 )
             else:
                 prompt = (
-                    f"{no_post_rule}"
                     f"You are an AI assistant responding to a Slack message. "
                     f"The message is: {text}\n\n"
                     f"Process this as a task. Use all available MCP tools "
