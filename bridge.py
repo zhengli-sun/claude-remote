@@ -1154,11 +1154,7 @@ def _mcp_call(tool_name: str, arguments: dict, token: str) -> Optional[dict]:
         with urlopen(req, timeout=30) as resp:
             body = json.loads(resp.read())
             if "error" in body:
-                err_msg = str(body["error"].get("message", "")) if isinstance(body["error"], dict) else str(body["error"])
-                if "not_found" in err_msg:
-                    log.warning("MCP warning: %s", body["error"])
-                else:
-                    log.error("MCP error: %s", body["error"])
+                log.error("MCP error: %s", body["error"])
                 return None
             return body.get("result", body)
     except HTTPError as e:
