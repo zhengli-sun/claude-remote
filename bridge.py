@@ -1409,14 +1409,22 @@ def slack_poll_cycle(token: str, state: dict):
 
     # 2. Check active threads for new replies
     new_thread_replies = []
+    thread_failures = state.get("thread_failures", {})
     for thread_ts, last_reply_ts in list(active_threads.items()):
         thread_text = mcp_read_thread(token, channel_id, thread_ts)
         if thread_text is None:
-            # Thread no longer exists — remove from tracking
-            log.info("Removing stale thread %s (not found)", thread_ts)
-            active_threads.pop(thread_ts, None)
-            state.get("thread_sessions", {}).pop(thread_ts, None)
+            count = thread_failures.get(thread_ts, 0) + 1
+            thread_failures[thread_ts] = count
+            if count >= 3:
+                log.info("Removing stale thread %s after %d failures", thread_ts, count)
+                active_threads.pop(thread_ts, None)
+                state.get("thread_sessions", {}).pop(thread_ts, None)
+                thread_failures.pop(thread_ts, None)
+            else:
+                log.info("Thread %s read failed (%d/3)", thread_ts, count)
             continue
+        # Reset failure count on success
+        thread_failures.pop(thread_ts, None)
         replies = parse_thread_replies(thread_text, last_reply_ts)
         for reply in replies:
             reply["thread_ts"] = thread_ts
@@ -1590,6 +1598,7 @@ def slack_poll_cycle(token: str, state: dict):
 
     state["active_threads"] = active_threads
     state["thread_sessions"] = thread_sessions
+    state["thread_failures"] = thread_failures
     save_slack_state(state)
 
     log.info("Processed %d, replied to %d", len(to_process), replied)
