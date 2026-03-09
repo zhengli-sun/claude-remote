@@ -1704,8 +1704,10 @@ def run_bridge(foreground: bool = False, gmail_enabled: bool = True, slack_enabl
                     if not slack_token:
                         log.warning("Slack token expired or missing")
                     else:
+                        log.info("Starting Slack poll cycle")
                         slack_state = load_slack_state()
                         slack_poll_cycle(slack_token, slack_state)
+                        log.info("Slack poll cycle complete")
                 except Exception:
                     log.exception("Error in Slack poll cycle")
 
