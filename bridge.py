@@ -46,6 +46,20 @@ from googleapiclient.discovery import build
 # ---------------------------------------------------------------------------
 
 CONFIG_DIR = Path.home() / ".claude-remote"
+
+# Load env overrides from ~/.claude-remote/env
+_env_file = CONFIG_DIR / "env"
+if _env_file.is_file():
+    with open(_env_file) as _f:
+        for _line in _f:
+            _line = _line.strip()
+            if _line and not _line.startswith("#") and "=" in _line:
+                if _line.startswith("export "):
+                    _line = _line[7:]
+                _key, _, _val = _line.partition("=")
+                _val = _val.strip('"').strip("'").replace("$HOME", str(Path.home()))
+                os.environ.setdefault(_key.strip(), _val)
+
 CLIENT_SECRET = CONFIG_DIR / "client_secret.json"
 TOKEN_FILE = CONFIG_DIR / "token.json"
 GMAIL_PROCESSED_FILE = CONFIG_DIR / "processed.txt"
@@ -62,7 +76,7 @@ SCOPES = [
 POLL_INTERVAL = int(os.environ.get("CLAUDE_REMOTE_POLL_INTERVAL", "15"))
 CLAUDE_TIMEOUT = 600  # 10 minutes
 MAX_RESPONSE_LEN = 50_000  # chars
-CLAUDE_CWD = str(Path.home() / "Projects")
+CLAUDE_CWD = os.environ.get("CLAUDE_REMOTE_CWD", str(Path.home() / "Projects"))
 SUBJECT_PREFIX = "cc"
 REPLY_SENDER_NAME = "ClaudeRemote"  # Display name on reply emails
 ATTACHMENTS_DIR = CONFIG_DIR / "attachments"
@@ -1049,10 +1063,11 @@ def gmail_poll_cycle(
 
 def _load_credentials() -> dict:
     """Load the Claude Code credentials file."""
-    if not CREDENTIALS_FILE.exists():
-        log.error("Credentials file not found: %s", CREDENTIALS_FILE)
+    try:
+        return json.loads(CREDENTIALS_FILE.read_text())
+    except (FileNotFoundError, PermissionError) as e:
+        log.error("Credentials file not found: %s (%s)", CREDENTIALS_FILE, e)
         return {}
-    return json.loads(CREDENTIALS_FILE.read_text())
 
 
 def _find_slack_token_entry(creds: dict) -> Optional[dict]:
@@ -1068,10 +1083,28 @@ def _find_slack_token_entry(creds: dict) -> Optional[dict]:
     return None
 
 
+SLACK_TOKEN_FILE = CONFIG_DIR / "slack_mcp_token.json"
+
+
 def get_slack_token() -> Optional[str]:
-    """Get the current Slack OAuth access token from Claude Code credentials."""
-    creds = _load_credentials()
-    entry = _find_slack_token_entry(creds)
+    """Get the Slack OAuth access token.
+
+    Checks in order:
+    1. Bridge's own token file (~/.claude-remote/slack_mcp_token.json)
+    2. Claude Code credentials file (~/.claude/.credentials.json)
+    """
+    # Try bridge's own persistent token first
+    entry = None
+    try:
+        entry = json.loads(SLACK_TOKEN_FILE.read_text())
+    except (FileNotFoundError, PermissionError):
+        pass
+
+    # Fall back to Claude Code credentials
+    if not entry or not entry.get("accessToken"):
+        creds = _load_credentials()
+        entry = _find_slack_token_entry(creds)
+
     if not entry:
         log.error("No active Slack MCP token found in credentials")
         return None
@@ -1081,8 +1114,7 @@ def get_slack_token() -> Optional[str]:
     now_ms = int(time.time() * 1000)
     if expires_at and now_ms > expires_at:
         log.warning(
-            "Slack token expired at %s. Run any Slack MCP tool in Claude Code "
-            "to refresh it, then restart the bridge.",
+            "Slack token expired at %s. Run: .venv/bin/python slack_oauth.py",
             datetime.fromtimestamp(expires_at / 1000).isoformat(),
         )
         return None
