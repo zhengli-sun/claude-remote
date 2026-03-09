@@ -626,6 +626,19 @@ def list_sessions(count: int = 10) -> str:
     return header + "\n\n".join(entries)
 
 
+def delete_claude_session(session_id: str):
+    """Delete a Claude Code session file from disk."""
+    cwd_slug = CLAUDE_CWD.replace("/", "-").replace(".", "-")
+    session_file = CLAUDE_SESSIONS_DIR / cwd_slug / f"{session_id}.jsonl"
+    try:
+        session_file.unlink()
+        log.info("Deleted Claude session file: %s", session_id[:8])
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        log.warning("Failed to delete session file %s: %s", session_id[:8], e)
+
+
 # ---------------------------------------------------------------------------
 # Gmail State Management
 # ---------------------------------------------------------------------------
@@ -1417,8 +1430,10 @@ def slack_poll_cycle(token: str, state: dict):
             thread_failures[thread_ts] = count
             if count >= 3:
                 log.info("Removing stale thread %s after %d failures", thread_ts, count)
+                session_id = state.get("thread_sessions", {}).pop(thread_ts, None)
+                if session_id:
+                    delete_claude_session(session_id)
                 active_threads.pop(thread_ts, None)
-                state.get("thread_sessions", {}).pop(thread_ts, None)
                 thread_failures.pop(thread_ts, None)
             else:
                 log.info("Thread %s read failed (%d/3)", thread_ts, count)
@@ -1588,11 +1603,19 @@ def slack_poll_cycle(token: str, state: dict):
 
     # Prune stale threads (>7 days)
     cutoff = time.time() - 7 * 86400
+    pruned_threads = {
+        k for k, v in active_threads.items()
+        if float(v) <= cutoff
+    }
     active_threads = {
         k: v for k, v in active_threads.items()
-        if float(v) > cutoff
+        if k not in pruned_threads
     }
     thread_sessions = state.get("thread_sessions", {})
+    for thread_ts in pruned_threads:
+        session_id = thread_sessions.pop(thread_ts, None)
+        if session_id:
+            delete_claude_session(session_id)
     thread_sessions = {
         k: v for k, v in thread_sessions.items()
         if k in active_threads
