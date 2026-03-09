@@ -1454,7 +1454,9 @@ def slack_poll_cycle(token: str, state: dict):
                 newest_ts = msg["ts"]
         if newest_ts != last_ts:
             state["last_checked_ts"] = newest_ts
-            save_slack_state(state)
+        # Always save if thread_failures changed or timestamp updated
+        state["thread_failures"] = thread_failures
+        save_slack_state(state)
         return
 
     log.info(
