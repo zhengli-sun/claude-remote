@@ -1412,6 +1412,10 @@ def slack_poll_cycle(token: str, state: dict):
     for thread_ts, last_reply_ts in list(active_threads.items()):
         thread_text = mcp_read_thread(token, channel_id, thread_ts)
         if thread_text is None:
+            # Thread no longer exists — remove from tracking
+            log.info("Removing stale thread %s (not found)", thread_ts)
+            active_threads.pop(thread_ts, None)
+            state.get("thread_sessions", {}).pop(thread_ts, None)
             continue
         replies = parse_thread_replies(thread_text, last_reply_ts)
         for reply in replies:
