@@ -47,6 +47,7 @@ def run_oauth_flow():
         "canvases:write",
         "users:read",
         "users:read.email",
+        "reactions:write",
     ])
 
     auth_url = (

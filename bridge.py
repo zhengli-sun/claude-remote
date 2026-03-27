@@ -110,6 +110,7 @@ DIGEST_LAST_SENT_FILE = CONFIG_DIR / "digest_last_sent.txt"
 CANCEL_FILE = CONFIG_DIR / "cancel.txt"
 
 RATE_LIMIT_PER_HOUR = 20  # Max Claude invocations per hour
+SKIP_PERMISSIONS = False  # Set via --dangerously-skip-permissions CLI flag
 RATE_LIMIT_FILE = CONFIG_DIR / "rate_limit.json"  # Tracks invocation timestamps
 
 SUMMARY_ENABLED = os.environ.get("CLAUDE_REMOTE_SUMMARY_ENABLED", "false").lower() == "true"
@@ -575,6 +576,8 @@ def invoke_claude(
     env.pop("CLAUDECODE", None)  # Strip nested session guard
 
     cmd = ["claude", "-p", "--output-format", "text"]
+    if SKIP_PERMISSIONS:
+        cmd.append("--dangerously-skip-permissions")
     if resume:
         cmd.extend(["--resume", session_id])
     else:
@@ -617,6 +620,7 @@ def invoke_claude(
             output = proc.stdout.read().strip()
             if proc.returncode != 0 and not output:
                 stderr_text = proc.stderr.read().strip()
+                log.error("Claude exited with code %d (session=%s): %s", proc.returncode, session_id[:8], stderr_text or "(no stderr)")
                 output = (
                     f"[Claude exited with code {proc.returncode}]\n\n"
                     + (f"Error: {stderr_text}\n\n" if stderr_text else "")
@@ -1523,8 +1527,23 @@ def _split_message(message: str, limit: int = _SLACK_MAX_MSG_LEN) -> list[str]:
     return chunks
 
 
+def _sanitize_slack_message(text: str) -> str:
+    """Sanitize message text for Slack mrkdwn compatibility.
+
+    Slack mrkdwn does not support markdown horizontal rules (---, ***, ___),
+    heading syntax (### ), or other GitHub-flavored markdown constructs.
+    Code blocks (``` ```) and inline code (` `) are supported and preserved.
+    """
+    # Replace horizontal rules (---, ***, ___) on their own line with a blank line
+    text = re.sub(r"^\s*[-*_]{3,}\s*$", "", text, flags=re.MULTILINE)
+    # Strip markdown heading prefixes (## Heading -> *Heading*)
+    text = re.sub(r"^#{1,6}\s+(.+)$", r"*\1*", text, flags=re.MULTILINE)
+    return text
+
+
 def mcp_send_message(token: str, channel_id: str, thread_ts: str, message: str) -> bool:
     """Send a message via MCP, chunking if it exceeds Slack's size limit."""
+    message = _sanitize_slack_message(message)
     chunks = _split_message(message)
     for i, chunk in enumerate(chunks):
         result = _mcp_call("slack_send_message", {
@@ -2210,9 +2229,10 @@ def slack_cross_channel_cycle(token: str, state: dict):
 # ---------------------------------------------------------------------------
 
 
-def run_bridge(foreground: bool = False, gmail_enabled: bool = True, slack_enabled: bool = False):
+def run_bridge(foreground: bool = False, gmail_enabled: bool = True, slack_enabled: bool = False, skip_permissions: bool = False):
     """Main loop: poll Gmail and/or Slack, process messages, reply."""
-    global _startup_time, _messages_processed, _executor
+    global _startup_time, _messages_processed, _executor, SKIP_PERMISSIONS
+    SKIP_PERMISSIONS = skip_permissions
     setup_logging(foreground=foreground)
     _messages_processed = 0
     _startup_time = datetime.now(timezone.utc)
@@ -2401,7 +2421,7 @@ def _find_bridge_pids():
     return pids
 
 
-def start_daemon(gmail_enabled: bool = True, slack_enabled: bool = False):
+def start_daemon(gmail_enabled: bool = True, slack_enabled: bool = False, skip_permissions: bool = False):
     """Start the bridge as a background subprocess."""
     # Check if already running
     pids = _find_bridge_pids()
@@ -2417,6 +2437,8 @@ def start_daemon(gmail_enabled: bool = True, slack_enabled: bool = False):
         cmd.append("--slack")
     else:
         cmd.append("--gmail")
+    if skip_permissions:
+        cmd.append("--dangerously-skip-permissions")
 
     # Launch as a detached subprocess
     proc = subprocess.Popen(
@@ -2576,12 +2598,14 @@ def main():
     run_parser.add_argument("--gmail", action="store_true", help="Enable Gmail transport")
     run_parser.add_argument("--slack", action="store_true", help="Enable Slack MCP transport")
     run_parser.add_argument("--all", action="store_true", help="Enable both Gmail + Slack")
+    run_parser.add_argument("--dangerously-skip-permissions", action="store_true", help="Bypass all Claude permission checks")
 
     # start subcommand
     start_parser = subparsers.add_parser("start", help="Start as background daemon")
     start_parser.add_argument("--gmail", action="store_true", help="Enable Gmail transport")
     start_parser.add_argument("--slack", action="store_true", help="Enable Slack MCP transport")
     start_parser.add_argument("--all", action="store_true", help="Enable both Gmail + Slack")
+    start_parser.add_argument("--dangerously-skip-permissions", action="store_true", help="Bypass all Claude permission checks")
 
     # stop subcommand
     subparsers.add_parser("stop", help="Stop daemon")
@@ -2597,10 +2621,10 @@ def main():
 
     if args.command == "run":
         gmail_enabled, slack_enabled = _parse_transport_flags(args)
-        run_bridge(foreground=True, gmail_enabled=gmail_enabled, slack_enabled=slack_enabled)
+        run_bridge(foreground=True, gmail_enabled=gmail_enabled, slack_enabled=slack_enabled, skip_permissions=args.dangerously_skip_permissions)
     elif args.command == "start":
         gmail_enabled, slack_enabled = _parse_transport_flags(args)
-        start_daemon(gmail_enabled=gmail_enabled, slack_enabled=slack_enabled)
+        start_daemon(gmail_enabled=gmail_enabled, slack_enabled=slack_enabled, skip_permissions=args.dangerously_skip_permissions)
     elif args.command == "stop":
         stop_daemon()
     elif args.command == "status":
